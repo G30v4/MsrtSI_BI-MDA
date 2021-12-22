@@ -1,0 +1,554 @@
+---
+title: "Final Project - Mod 2"
+subtitle: "Example of a logistic regression model, applied to bank credit approval"
+authors: "@G30v4 & others Authors"
+output:
+  html_document:
+    df_print: paged
+  pdf_document: default
+---
+
+## Authors:
+
++------------------+--------------------+
+| -   C. M.        | -   @G30v4         |
++------------------+--------------------+
+| -   D. R.        | -   G.  B.         |
++------------------+--------------------+
+| -   D. O.        | -   M. D.          |
++------------------+--------------------+
+
+## Objetivos:
+
+-   Poner en practica los conceptos aprendidos para el Analisis Exploratorio de Datos.
+
+-   Aplicar los modelos estadisticos para predecir la aprobación de un credito bancario.
+
+## **Actividades a realizar**
+
+1.  Carga los datos. Realiza una inspección por variables de la distribución de aprobación de crédito en función de cada atributo visualmente. Realiza las observaciones pertinentes. ¿ Qué variables son mejores para separar los datos?
+
+2.  Prepara el dataset convenientemente e imputa los valores faltantes usando la librería `missForest`
+
+3.  Divide el dataset tomando las primeras 590 instancias como train y las últimas 100 como test.
+
+4.  Entrena un modelo de regresión logística con regularización Ridge y Lasso en train seleccionando el que mejor **AUC** tenga. Da las métricas en test.
+
+5.  Aporta los *log odds* de las variables predictoras sobre la variable objetivo.
+
+6.  Si por cada verdadero positivo ganamos 100e y por cada falso positivo perdemos 20e. ¿Qué valor monetario generará el modelo teniendo en cuénta la matriz de confusión del modelo con mayor AUC (con las métricas en test)?
+
+## **Previos**
+
+```{r}
+# Instalación de dependencias (librerías)
+#install.packages("kableExtra") # Funcionalidades extras para Kable
+#install.packages("dbplyr") # necesario para tidyverse - solo si da problemas
+#install.packages("tidyverse") # Colección de paquetes R para ciencia de datos
+#install.packages("xray") # Analisis de datasets previo a modelados estadisticos
+#install.packages("Hmisc") # Análisis de correlación *
+#install.packages("GGally") # Análisis de correlación visual
+#install.packages("gridExtra") # Para ...
+#install.packages("missForest") # Para imputacion de variables con ML
+#install.packages("glmnet") # Para los modelos de entrenamiento
+#install.packages("broom") # Para funcion (tidy) - Ofrece un marco poderoso para la manipulación y el análisis de datos
+#install.packages("e1071") # Requerido por caret
+#install.packages("caret") # Generar la matriz de confusión
+```
+
+```{r message=FALSE, warning=FALSE}
+# Importación de las librerías
+library(kableExtra)
+library(tidyverse)
+library(xray)
+#library(Hmisc)
+library(GGally)
+library(FSelector)
+library(gridExtra)
+library(missForest)
+library(glmnet)
+library(broom)
+library(caret)
+```
+
+```{r}
+# Limpieza de las variables del entorno de trabajo
+rm(list = ls())
+
+# Imprime la ruta del directorio de trabajo
+getwd()
+```
+
+0.  **Estructuración del código**
+
+    Definimos la lógica en pequeñas funciones para mejor comprensión y reutilización del código
+
+    ```{r}
+    # Función - Carga de datos
+    loadData <- function(url){
+      # Seteamos nombres de las cabeceras de las columnas
+      colNm <- paste("A", 1:16, sep = "")
+      # Carga de datos, sin cabezare, sepado por (,) y definiendo nombres a columnas
+      dt <- read.csv(url, header = FALSE, sep = ",", na.strings = "?", col.names = colNm )
+      return(dt)
+    }
+    ```
+
+    ```{r}
+    # Función - Refactorizar tipos de datos de columnas
+    refactorCols <- function(df){
+      df[,c(2,3,8,11,14,15)] <- lapply(df[,c(2,3,8,11,14,15)], as.numeric) # A numerico
+      df[,c(1,4:7,9,10,12,13)] <- lapply(df[,c(1,4:7,9,10,12,13)], as.factor) # A factor
+      # valores perdidos están identificados con "?". Cambiamos a valor perdido por defecto de R
+      df <- df %>% na_if("?") #Volemos a verrificar si existen datos con [?] y cambiamos a NAa
+      return(df)
+    }
+    ```
+
+    ```{r}
+    # Función - Refactorizar la columna de clase o de estudio
+    refactorClassVar <- function(df){
+      df <- df %>%
+        mutate(
+          A17 = ifelse(A16 == '+', 1, 0)# 'APROBADO', 'NEGADO')
+        )
+      df$A17 <- as.factor(df$A17) # comnvertimos a factor a la variable
+      return(df)
+    }
+    ```
+
+    ```{r}
+    # Función - Mostrar Columnas con NAs
+    checkNACols <- function(df){
+      nm <- names(df[apply(is.na(df), 2, sum)>=1]) # seleccionas los names de las colunas con NAs
+      c <- apply(is.na(df[,nm]), 2, sum) # Recupera la cantidad de NAs de las columas con NAs
+      data.frame(countNAs = c) %>%
+        kable() %>%
+          kable_styling(font_size = 11, full_width = F) %>%
+        row_spec(0, color = "black", background = "lightgrey") # Estilos a los Header
+    }
+    ```
+
+    ```{r}
+    # Función - Inspección del dataset - (Anomalias - NAs)
+    viewAnomalies <- function(df) {
+      anmly <- anomalies(df)$variables[,-c(7,8,9,10)] #Obtenemos anomalias y seleccionamos columnas de interes
+      kable(anmly) %>% 
+        kable_styling(font_size = 12, full_width = F, position = "center") %>%
+      row_spec(0, color = "black", background = "lightgrey") %>% # Etilos a los Header
+      row_spec(which(anmly$qZero > 0), background = "#FFC32E") %>% # Estilo a filas por condicion [qZero>0]
+      row_spec(which(anmly$qNA > 0), bold = T, color = "white", background = "red") %>% # Estilo a filas por condicion [qNA>0]
+      column_spec(1, bold = T, border_right = T, color = "black", background = "lightgrey") #Estilo a la 1er Col
+    }
+    ```
+
+    ```{r}
+    # Función - Graficar por tipo de variable
+    # Dibuja un grafico dada una variable "A17" presente en un data.frame, contra otra de las variables del mismo data.frame.
+    # El tipo de grafico depende del tipo de variable
+    graphByType <- function(df, var) {
+      # aislamiento de la variable elegida para detectar su clase
+      selectVar <- df[ ,var]
+      if (is.factor(selectVar)) {
+        # guarda grafico de barras si la variable explicativa es factor
+        graph <- df %>%
+          ggplot(aes_string(x = var)) +
+          geom_bar(aes(fill = A17), position = "dodge" , alpha = 0.7) # dividimos A17 por color
+      }
+      else {
+        # guarda diagrama de caja si la variable explicativa es numerica
+        graph <-  df %>%
+          ggplot(aes(x = A17)) +
+          geom_boxplot(aes_string(y = var, fill = "A17") , alpha = 0.7) # una caja para cada uno de los valores de A17
+      }
+
+      # dibujo y formateo del grafico
+      graph + labs(x = "", y = "", fill = "", title = var) + # etiquetas de ejes y titulo
+        scale_fill_manual(values = c("red", "green")) + # colores para los valores de A17
+        theme_bw() + # tema generico del grafico
+        # establecimiento de tamaño de fuentes
+        theme(plot.title = element_text(size = 9),
+              axis.text.y = element_text(size = 6))
+    }
+    ```
+
+    ```{r}
+    # Función - Gráfica de Ganancia de Información
+    # grafica en un diagrama de barras la ganancia de informacion de las variables de un data.frame al desagruparlas por la variable A17
+    graphInfromationGain <- function(df) {
+      # calculo de ganancia de informacion y formato del data.frame resultante
+      information.gain(A17~., data = df) %>%
+        mutate(variables = rownames(.)) %>%
+        select(variables, attr_importance) %>%
+
+        # generacion del grafico
+        ggplot(aes(x = fct_reorder(variables, attr_importance), y = attr_importance)) +
+
+        # columnas
+        geom_col(fill = "#FFDB6D", alpha = 0.8) +
+
+        # particion de columnas con linea blanca
+        geom_hline(yintercept = seq(0, 0.3, by = 0.05), color = "white") +
+
+        # inversion de coordenadas para convertir columnas en barras
+        coord_flip() +
+
+        # adicion de etiquetas numericas con ganancia de información
+        geom_text(aes(label = round(attr_importance, 3)), nudge_y = 0.015, color = "#293352") +
+
+        # Formato del grafico
+        labs(x = "Variables", y = "Ganancia de informacion",
+             title = "Importancia de las variables independientes respecto a A17") +
+        theme_bw() +
+        theme(axis.line = element_line(color = "black"),
+              axis.text = element_text(),
+              panel.border = element_blank(),
+              legend.background = element_rect(size = 1),
+              legend.key = element_rect(size = 0.2),
+              panel.grid = element_blank(),
+              plot.subtitle = element_text(color = "darkgoldenrod4"))
+    }
+    ```
+
+    ```{r}
+    # Función - Tratamiento de Datos Atipicos (Outliers)
+    fixOutliers <- function(df, colOtl, nDs) {
+      zx <- (df[ ,colOtl] - mean(df[ ,colOtl]))/ sd(df[ ,colOtl])
+      outliers <- df[ ,colOtl][which(zx > nDs)] # Encuentro los outliers con n desviaciones estandar
+      idx <- which(df[ ,colOtl] %in% outliers) # Obtenemos los indices de los outlies en la variable
+      df[ ,colOtl][idx] <- NA # Remplazamos por NAs , alternativa no recomendada (ideal quitarlos)
+      #df[ ,colOtl][idx]
+      hist(df[,colOtl]) # Grafico de caja y bigote comprobar datos atipicos
+      return(df)
+    }
+    ```
+
+    ```{r}
+    # Función - Imputación de valores en las variables
+    fixMissing <- function(df, colsMiss) {
+      varMiss <- missForest(df[,colsMiss])
+      df[,colsMiss] <- varMiss$ximp
+      return(df)
+    }
+    ```
+
+    ```{r}
+    # Función - Entrenamiento del Modelo
+    trainModel <- function(x, y, nf){ # nf no considerado par el ejercicio
+      # Modelo Ridge
+      ridge <- cv.glmnet(x,y,family = "binomial",alpha=0,
+                     parallel=TRUE, standardize=TRUE, type.measure='auc')#, nfolds = nf) # algoritmo construirá nfolds modelos +1.
+      
+      # Modelo Lasso
+      lasso <- cv.glmnet(x,y,family = "binomial",alpha=1,
+                     parallel=TRUE, standardize=TRUE, type.measure='auc')#, nfolds = nf)
+      
+      # estimacion del mejor AUC en cada modelo
+      auc_ridge <- max(ridge$cvm) #CMV -> el error medio de validación cruzada
+      auc_lasso <- max(lasso$cvm)
+
+      cmpModels <- c(auc_ridge, auc_lasso) # Para gaurdar las estimacions de los modelos
+      
+      bestModelStr <- ifelse(auc_ridge > auc_lasso, "Modelo Optimo :: Ridge", "Modelo Optimo :: Lasso") #Para retornar el nombre del mejor modelo
+      
+      # Selecciona mejor modelo
+      if(auc_ridge > auc_lasso) {
+        bestModel <- ridge
+      } else {
+        bestModel <- lasso
+      }
+      # Devolvemos los paramentros de interes del entrenamiento
+      return(list(
+        ridge = ridge, 
+        lasso = lasso, 
+        cmpModels = cmpModels, 
+        bestModelStr = bestModelStr,
+        bestModel = bestModel
+        ))
+    }
+    ```
+
+    ```{r}
+    # Función - Testeo del Modelo
+    testModel <- function(model, test, xIndp){
+      x_test <- data.matrix(test[,xIndp]) #1:15
+      y_test <- data.matrix(test$A17)
+      pred <- as.numeric(predict.glmnet(model$glmnet.fit, newx=x_test, s=model$lambda.min)>.5) # Genera los valores predecidos a partir de la data de test
+      #predOrigin <-cbind(as.numeric(pred),as.numeric(y_test)) 
+      predOrigin <-data.frame(prediction=as.numeric(pred), real=as.numeric(y_test)) 
+      return(list(
+        y_test = y_test,
+        pred = pred,
+        predOrigin = predOrigin # Retorna una tabla de los valores predecidos y reales
+        ))
+    }
+    ```
+
+    ```{r}
+    # Función - Comprension del Modelo
+    profitCalc<-function(df){
+    test<-df  
+    VerdaderoPositivo<-test$table[2,2]
+    FalsoPositivo<-test$table[1,2]
+    FalsoNegativo<-test$table[2,1]
+    VerdaderoNegativo<-test$table[1,1]
+
+    ganacia <- data.frame(VerdaderoPositivo,VerdaderoNegativo,FalsoPositivo,FalsoNegativo)
+    ganacia <- ganacia %>% mutate (
+                         Ganacia= (VerdaderoPositivo*100) ,
+                         Perdida= (FalsoPositivo*20*-1),
+                         GanaciaTotal= (VerdaderoPositivo*100) - (FalsoPositivo*20))
+    return(ganacia)
+    }
+    ```
+
+1.  **Carga de Datos**
+
+    ```{r}
+    # Definimos la ruta de la fuente de datos (local o remota)
+    #url <- "https://archive.ics.uci.edu/ml/machine-learning-databases/credit-screening/crx.data" # ruta remota
+    url <- paste(getwd(),"/crx.data", sep = "") #ruta local
+    ```
+
+    ```{r}
+    dt <- loadData(url)
+    #knitr::kable(head(dt, n=15), format = "html")
+    head(sample_n(dt, 30), n=30) # Imprime una muestra [30] de los datos
+    ```
+
+    ```{r}
+    # Verificamos tipos de datos al cargar la data
+    str(dt)
+    ```
+
+    ```{r}
+    # Refactorizar tipos de datos
+    #dt <- refactorCols(dt)
+    #dt <- refactorClassVar(dt)
+    dt <- dt %>%
+      refactorCols() %>%
+      refactorClassVar()
+    str(dt)
+    ```
+
+    ```{r}
+    # Verificar variables con NA
+    checkNACols(dt)
+    ```
+
+    **1.1 Interpretación**
+
+    ```{r message=FALSE, warning=FALSE}
+    # Inspeccion de variables
+    viewAnomalies(dt[,-16])
+    ```
+
+    ##### Interpretaciones de la Tabla:
+
+    > -   Podemos observar que existen 7 variables ( A1, A2, A4, A5, A6, A7, A14) que presentan ausencia de datos o NAs, las cuales seran consideradas para el proceso de imputación de las variables
+    > -   Se observa que existen 4 variables ([A11, A15, A14, A8]{.ul}) con fuerte anomalia, es decir que en su caso puede existir valores atípicos.
+
+    ```{r message=FALSE, warning=FALSE}
+    # Inspeccion de variables
+    ## Inspeccion de correlacion entre variables numerica y la variable dependiente [A17]
+    ggpairs(dt[,c(2,3,8,11,14,15,17)])
+    ```
+
+    ##### Interpretaciones de la grafica:
+
+    > -   Se puede observar que existen algunas variables con correlacion significativa, lo cual es un aspecto imprtante a considerar tanto para la imputación de las variables con NAs, como en el caso de A2 \<-\> A8 o A2 \<-\> A3, las cuales permitiran un mejor resultado en la imputacion de la variable A2
+    > -   Un aspecto importante es considirear que la correlación entre las variables es muy baja entre ellos.
+
+    ```{r message=FALSE, warning=FALSE}
+    # Pregunta 2 Graficas Correlacion
+    # creacion de lista de graficos de A17 contra el resto de variables
+    graphsByNumeric <- map(paste0("A", c(2,3,8,11,14,15)), ~graphByType(dt[,c(2,3,8,11,14,15,17)], .x)) # mapeamos las var[numericas] a gráficos
+    graphsByFactor <- map(paste0("A", c(1,4:7,9,10,12,13)), ~graphByType(dt[,c(1,4:7,9,10,12,13,17)], .x)) # mapeamos las var[factores] a gráficos
+    # dibujo de los gráficos para las variables numericas en un panel de 3 columnas
+    grid.arrange(grobs = graphsByNumeric, ncol = 3,
+                 top = "Distribución de las variables Numéricas respecto a A17")
+
+     # dibujo de los gráficos para las variables categoricas en un panel de 3 columnas
+    grid.arrange(grobs = graphsByFactor, ncol = 3,
+                 top = "Distribución de las variables Categóricas respecto a A17")
+
+    ```
+
+    ##### Interpretaciones de las grafica:
+
+        > -   Respecto a las gracifas caja y bigote para las variables numericas, se logra evidenciar la presencia en gran medidad de datos atípicos en cada de una de ellas lo que generaria much o ruido a la hora de imputar los datos con missForest asi como a la hora del entremaniemot por lo que aconseja realizar un trapamiento a los datos atípcos en cada varibale.
+        > -   Primeramente se logra evidencia la presencia de NAs, asi como, el nivel de aporte de cada uno de los factores respecto a la variable a predecir, como por ejemplo diremos que de la variable A9 al tener como valor [f] incrementa la posibilidad de que no se apruebe el credito, por el contrario al ser [t] de que si se apruebe, siempre y cuando se agregue la variable al modelo. 
+
+    ```{r}
+    # Presentar la información de ganancia de cada variable del dataset respecto a la variable dependiente
+    graphInfromationGain(dt[,-16])
+    ```
+
+    ##### Interpretaciones de la graficas:
+
+    > -   Las variables con más influencia sobre la dependiente parecen ser la A9 y la A10. El calculo de la ganancia de información confirma la influencia de estas dos variables. Pero aparecen también en lugar destacado las variables A11 y A15, cuya influencia pasa desapercibida en el gráfico debido a que hay presencia de valores extremos. Se da el caso de que son las mismas variables con una grán presencia de ceros.
+
+    ```{r message=FALSE, warning=FALSE}
+    # Inpseccion de las variables A11 y A15
+    graphVarsMax <- map(c("A11", "A15"), # seleccionamos las variables a maximizar
+                               ~graphByType(dt, .x) +
+                                 scale_y_log10() +
+                                 theme(plot.subtitle = element_text(size = 6)))
+    grid.arrange(grobs = graphVarsMax, ncol = 2,
+                top = "Inspección de variables [A11 - A15] respecto a A17 en escala logarítmica")
+    ```
+
+    ##### Interpretaciones de la graficas:
+
+    > -   Se puede observar que las variables tienen un nivel de aporte a la variable objetivo una vez maximizada su escala, de igual manera se aprecia la presencia de datos atipicos.
+
+    ##### ¿ Qué variables son mejores para separar los datos?
+
+    > -   Del EDA (Análisis Exploratorio de los Datos) se puede deteterminar que las variables con mayor interes tanto para la imputación de datos como para el entrenamiento del modelo son :
+    > -   A8 -\> para tratamiento de los missing values por correlación con A2
+    > -   A6, A8, A9, A10, A11, A15 -\> para el entrenamiento del modelo
+
+2.  **Preparación de Dataset**
+
+    **2.1 Paso EXTRA a Considerar**
+
+    ```{r message=FALSE, warning=FALSE}
+        # Tratamiento de Outliers de las variables [A11, A15]
+        # Para este caso se opta por sustituir los outliers por NAs para q el algoritmo de missings determine el mejor valor
+        # NOTA: Es recomendable eliminar Outliers
+        dt <- fixOutliers(df=dt, colOtl="A11", nDs=3) # Aplicamos la función a [A11] con 3 desviaciones estandar
+        dt <- fixOutliers(df=dt, colOtl="A15", nDs=3) # Aplicamos la función a [A15] con 3 desviaciones estandar
+    ```
+
+    **2.2 Imputación**
+
+    ```{r message=FALSE, warning=FALSE}
+        # Imputación de variables
+        #colsMiss <- c(1,2,4:7,14) # Solo considero las variables con NAs
+        #colsMiss <- c(1,2,4:8,14) # Agregamos las variables [A8] q tiene una correlación con las que se van a imputar
+        colsMiss <- c(1,2,4:8,11,15,14) # Agregamos las variables [A8] por correlación y [A11,A15] imputar outliers
+        dt <- fixMissing(dt, colsMiss)
+        summary(dt)
+        #dt[apply(is.na(dt), 2, sum)] 
+    ```
+
+    ```{r}
+    # Verificar variables con NA nuevamente
+    checkNACols(dt)
+    ```
+
+    ```{r}
+    # Verificar ganancia de información nuevamente
+    viewAnomalies(dt[,-16])
+    ```
+
+    ```{r message=FALSE, warning=FALSE}
+    # Inspección de las variables A11 y A15 luego de la imputacion y tratameinto de outliers
+    graphVarsMax <- map(c("A11", "A15"), # seleccionamos las variables a maximizar
+                               ~graphByType(dt, .x) +
+                                 scale_y_log10() +
+                                 theme(plot.subtitle = element_text(size = 6)))
+    grid.arrange(grobs = graphVarsMax, ncol = 2,
+                top = "Inspección de variables [A11 - A15] respecto a A17 en escala logarítmica")
+    ```
+
+    ##### Interpretaciones de la graficas:
+
+    > -   Habiendose realizado el proceso de tratamiento de outliers a las variables A11 y A15, se logra establizar en cierto modo a las variables, aunque aun se persive una presencia de outliers en la variable A15. Se podria considerar para un otro caso aplicarle 2 desviaciones estandar para ver su comportamiento.
+
+    ```{r}
+    # Verificamos nuevamente la ganacia de información
+    graphInfromationGain(dt[,-16])
+    ```
+
+    ##### Interpretaciones de la tabla:
+
+    > -   Se logra ver una leve variacion en el nivel de importancia de la variable A11 con un pequeño incremenento, de igual forma A15 con un minimo decremento, pero siguen siendo las mas relevantes a considerar dentro del modelo.
+    > -   A8 -\> para tratamiento de los missing values por correlación con A2
+    > -   A6, A8, A9, A10, A11, A15 -\> para el entrenamiento del modelo
+
+3.  **Generación del Modelo**
+
+    3.1. Seleccion datos de entrenamiento y test
+
+    ```{r}
+    # Dividir data de entrenamiento y test
+    dt.train <-dt %>% slice(1:590) # Se escoje los primeros 590 para entrenamiento
+    dt.test <- dt %>% slice(591:nrow(dt)) # Se separa los ultimos 100 para pruebas
+
+    xIndp <- c(6,8,9,10,11,15) # Seleccionamos las variables de interes
+    #xIndp <- c(1:15) # Para un estudi considerando todas las variables | -c(16,17)
+
+    ## Data Farmateada para el entrenamiento
+    x.train <- data.matrix(dt.train%>%select(all_of(xIndp))) #Para el analisis (Independientes) - revisar seleccionar las relevantes
+    y.train <- data.matrix(dt.train$A17) # La de estudio - dependiente
+    ```
+
+    3.2 Entrenamiento
+
+    ```{r message=FALSE, warning=FALSE}
+    # Realizamos el entrenamiento del modelo
+    model.train <-  trainModel(x=x.train ,y=y.train, nf=1 )
+    model.train$cmpModels
+    model.train$bestModelStr # Imprime el nombre del mejor modelo
+    ```
+
+    ```{r}
+    # Grafica del Mejor Modelo 
+    plot(model.train$bestModel)
+    ```
+
+    ##### **Explicaciones:**
+
+    > -   Se logra evidenciar que ambos modelos tiene resultados similares respescto a su AUC, por lo que tiende a variar la eleccion del mejor modelo para el proceso de predicciones, siendo ambos superior al 0.9 en el (cvm) error medio de validación cruzada.
+    > -   A partir de la grafica se podria deducir q el modelo es estable en gran medida ya que los mejores resultados se encuentran dentro de un error estandar que seria lo mas razonable para la predicción. AUnque existe un muy pequeño margen fuera del los lambas que determinarian como una mala predicción .
+
+    3.3 Predicción
+
+    ```{r}
+    # Predicción con el mejor modelo
+    # Poniendo a prueba el mejor modelo los los datos de test anteriormente seleccionados
+    resModel <- testModel(model = model.train$bestModel, test = dt.test, xIndp = xIndp)
+    head(sample_n(resModel$predOrigin, 30), n=30) # Presentamos una muestra de la prediccón
+    ```
+
+4.  **Logs Odds**
+
+    ```{r message=FALSE, warning=FALSE}
+    ## Aporta los log odds de las variables predictoras sobre la variable objetivo
+    logodds <- tidy(coef(model.train$bestModel, s = model.train$bestModel$lambda.min))[c(1, 3)]
+    names(logodds) <- c("Variable", "Beta")
+    logodds$Beta <- round(logodds$Beta, 4)
+    #generacion de tabla
+    kable(logodds) %>% kable_styling(full_width = F, bootstrap_options = "condensed") %>%
+     row_spec(0, color = "black", background = "lightgrey") %>%
+     row_spec(which(logodds$Beta > 0.4), background = "#FFC32E") # Estilo a filas por condicion [qZero>0]
+    ```
+
+    ##### **Interpretacion:**
+
+    > -   Se puede observar que las variables A9 y A10 son la que mayor infuencia al momento de la predicción.\
+    > -   Se refleja al final q la variable A15 no aporta en gran media al modelo, considerando que dicha variable tenia un gran cantidad de outliers.
+
+5.  **Análisis del Módelo**
+
+    ```{r}
+    # Matriz de Confusión
+     conf_matrix <- confusionMatrix(as.factor(resModel$pred),as.factor(resModel$y_test), mode="everything", positive = "1")
+     conf_matrix$table
+    ```
+
+    ##### Observaciones:
+
+    > -   Se puede observar que el modelo esta sobrecargado para predecir bien los negativos
+
+    ```{r}
+    ## Calculo de ganancia
+    profitCalc(conf_matrix)
+    ```
+
+6.  **Conclusiones**
+
+    > -   Se puede observar que el modelo califica con mayor presicion y sobrecarga a los verdaderos negativos y eso se debe a que la data de test presenta un 86% de valores negativos. Se recomiando en este caso seleccionar una data de forma randomica la data de entrenamiento y pruebas.
+    > -   Se logra evidenciar que el modelo tiene una especificidad de el 92% que seria la precicion con la que este calificaria correctamente pero eso podria variar dependiendo de el proceso que se realice durante el tratamiento de los datos.
+    > -   Respecto a la ganancia con los resultados del modelo se puede observar que es mas significativa el nivel de ganancia considerando que da mayor peso a los falsos positivos, Al asignar un valor economico se puede reflegar esa ganancia total como se refleja en la tabla anterior.
